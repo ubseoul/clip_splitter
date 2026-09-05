@@ -276,7 +276,7 @@
   </div>
 
   <div class="empty-note" id="emptyNote">No clips yet — upload a video above to get started.</div>
-  <p style="text-align:center; color:var(--text-dim); font-size:0.68rem; margin-top:24px;">build: standalone-remux-v1</p>
+  <p style="text-align:center; color:var(--text-dim); font-size:0.68rem; margin-top:24px;">build: standalone-remux-v2-bframe-fix</p>
 
 <script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
@@ -320,22 +320,25 @@ function fmtTime(s) {
 // (browser, Photos, Files, QuickTime) reads it the same simple way.
 
 // Groups samples into keyframe-aligned batches close to the target length.
+// Walks samples in their natural decode order (required for correct playback
+// when a video uses B-frames) and uses presentation time (cts) only to judge
+// roughly how much real playback time has accumulated.
 function groupIntoClips(samples, trackTimescale, segLenSeconds) {
   const segLenTS = segLenSeconds * trackTimescale;
   const groups = [];
   let current = [];
-  let groupStartDts = null;
+  let groupStartCts = null;
   for (const s of samples) {
     if (current.length === 0) {
       current.push(s);
-      groupStartDts = s.dts;
+      groupStartCts = s.cts;
       continue;
     }
-    const elapsed = s.dts - groupStartDts;
+    const elapsed = s.cts - groupStartCts;
     if (elapsed >= segLenTS && s.is_sync) {
       groups.push(current);
       current = [s];
-      groupStartDts = s.dts;
+      groupStartCts = s.cts;
     } else {
       current.push(s);
     }
@@ -346,6 +349,8 @@ function groupIntoClips(samples, trackTimescale, segLenSeconds) {
 
 // Builds one standalone MP4 file from a group of already-encoded samples —
 // pure container writing, no decoding or re-encoding of the video itself.
+// Samples are fed in decode order with their presentation (cts) timestamps;
+// the muxer derives correct internal decode timing from that order itself.
 function buildClipFromSamples(sampleGroup, trackTimescale, codecFamily, width, height, description) {
   const muxer = new Muxer({
     target: new ArrayBufferTarget(),
@@ -353,14 +358,12 @@ function buildClipFromSamples(sampleGroup, trackTimescale, codecFamily, width, h
     fastStart: 'in-memory'
   });
 
-  const dtsOffset = sampleGroup[0].dts;
+  const ctsOffset = Math.min(...sampleGroup.map(s => s.cts));
   for (const s of sampleGroup) {
-    const relDts = s.dts - dtsOffset;
-    const relCts = s.cts - dtsOffset;
-    const timestampUs = Math.round((relDts / trackTimescale) * 1e6);
+    const relCts = s.cts - ctsOffset;
+    const timestampUs = Math.round((relCts / trackTimescale) * 1e6);
     const durationUs = Math.round((s.duration / trackTimescale) * 1e6);
-    const compOffsetUs = Math.round(((relCts - relDts) / trackTimescale) * 1e6);
-    muxer.addVideoChunkRaw(s.data, s.is_sync ? 'key' : 'delta', timestampUs, durationUs, undefined, compOffsetUs);
+    muxer.addVideoChunkRaw(s.data, s.is_sync ? 'key' : 'delta', timestampUs, durationUs);
   }
   muxer.finalize();
   return muxer.target.buffer;
@@ -396,7 +399,10 @@ async function processFile(file) {
     height = entry.height;
 
     setStatus('Extracting frames…');
-    mp4boxfile.onSamples = (id, user, samples) => { allSamples.push(...samples); };
+    mp4boxfile.onSamples = (id, user, samples) => {
+      if (id !== vTrack.id) return; // safety: only ever keep this video track's samples
+      allSamples.push(...samples);
+    };
     mp4boxfile.setExtractionOptions(vTrack.id, null, { nbSamples: 100000 });
     mp4boxfile.start();
   };
@@ -410,7 +416,9 @@ async function processFile(file) {
   if (errorMsg) throw new Error(errorMsg);
   if (allSamples.length === 0) throw new Error('No frames could be extracted from this file.');
 
-  allSamples.sort((a, b) => a.dts - b.dts);
+  // Samples arrive from mp4box.js in decode order already (that's how MP4's
+  // own sample table is defined) — no re-sorting needed, and re-sorting by
+  // the wrong field is exactly what caused the earlier timestamp-ordering bug.
   const groups = groupIntoClips(allSamples, trackTimescale, segLen);
 
   setStatus(`Building ${groups.length} clips…`);
@@ -419,9 +427,10 @@ async function processFile(file) {
       const buffer = buildClipFromSamples(groups[i], trackTimescale, codecFamily, width, height, description);
       const blob = new Blob([buffer], { type: 'video/mp4' });
       const url = URL.createObjectURL(blob);
-      const start = groups[i][0].cts / trackTimescale;
-      const lastS = groups[i][groups[i].length - 1];
-      const end = (lastS.cts + lastS.duration) / trackTimescale;
+      const ctsValues = groups[i].map(s => s.cts);
+      const start = Math.min(...ctsValues) / trackTimescale;
+      const endSample = groups[i].reduce((max, s) => (s.cts + s.duration > max.cts + max.duration ? s : max));
+      const end = (endSample.cts + endSample.duration) / trackTimescale;
       clips.push({ url, blob, start, end, index: i, name: `clip_${sessionStamp}_${i + 1}.mp4` });
     } catch (e) {
       appendLog(`[clip ${i + 1}] failed: ` + (e?.message || e));
