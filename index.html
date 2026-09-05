@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>Splitpoint — audio-based clip splitter</title>
+<title>Splitpoint — clip splitter</title>
 <style>
   :root{
     --bg: #0f1210;
@@ -227,7 +227,7 @@
     <div class="mark"></div>
     <h1>Splitpoint</h1>
   </div>
-  <p class="tagline">Upload a video, it finds the natural pauses in the audio, and splits it into clips you can preview and keep.</p>
+  <p class="tagline">Upload a video and it slices the whole thing into short clips you can preview and keep.</p>
 
   <div class="panel">
     <div class="drop" id="drop">
@@ -241,16 +241,6 @@
       <button id="clearFile">Remove</button>
     </div>
 
-    <div class="controls-row" id="modeToggleRow" style="margin-top:14px;">
-      <div class="field" style="flex:none;">
-        <label>Mode</label>
-        <select id="modeSelect" style="background:var(--bg-card); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:8px; font-size:0.85rem;">
-          <option value="fast" selected>Fast — fixed length clips</option>
-          <option value="smart">Smart — split on pauses (slower)</option>
-        </select>
-      </div>
-    </div>
-
     <div class="controls-row" id="fastControls">
       <div class="field">
         <label>Clip length</label>
@@ -259,20 +249,7 @@
       </div>
     </div>
 
-    <div class="controls-row" id="smartControls" style="display:none;">
-      <div class="field">
-        <label>Silence sensitivity (dB)</label>
-        <input type="range" id="noiseFloor" min="-50" max="-15" value="-30">
-        <span class="val" id="noiseFloorVal">-30 dB</span>
-      </div>
-      <div class="field">
-        <label>Min pause length</label>
-        <input type="range" id="minSilence" min="2" max="15" value="5">
-        <span class="val" id="minSilenceVal">0.5 s</span>
-      </div>
-    </div>
-
-    <button class="primary" id="processBtn" disabled>Split by audio</button>
+    <button class="primary" id="processBtn" disabled>Split into clips</button>
 
     <div class="status" id="statusRow">
       <div class="spinner"></div>
@@ -311,9 +288,8 @@ const drop = $('drop'), fileInput = $('fileInput'), filenameRow = $('filenameRow
       progressTrack = $('progressTrack'), progressFill = $('progressFill'),
       resultsWrap = $('resultsWrap'), clipList = $('clipList'), clipCount = $('clipCount'),
       emptyNote = $('emptyNote'), selectAllBtn = $('selectAllBtn'), downloadSelectedBtn = $('downloadSelectedBtn'),
-      noiseFloor = $('noiseFloor'), noiseFloorVal = $('noiseFloorVal'),
-      minSilence = $('minSilence'), minSilenceVal = $('minSilenceVal'),
-      logToggle = $('logToggle'), log = $('log');
+      logToggle = $('logToggle'), log = $('log'),
+      clipLength = $('clipLength'), clipLengthVal = $('clipLengthVal');
 
 let ffmpeg = null;
 let ready = false;
@@ -334,34 +310,14 @@ function fmtTime(s) {
   return `${m}:${sec.padStart(4,'0')}`;
 }
 
-const modeSelect = $('modeSelect'), fastControls = $('fastControls'), smartControls = $('smartControls'),
-      clipLength = $('clipLength'), clipLengthVal = $('clipLengthVal');
-
-modeSelect.addEventListener('change', () => {
-  const isFast = modeSelect.value === 'fast';
-  fastControls.style.display = isFast ? 'flex' : 'none';
-  smartControls.style.display = isFast ? 'none' : 'flex';
-  saveSettings();
-});
 clipLength.addEventListener('input', () => {
   clipLengthVal.textContent = `${parseFloat(clipLength.value).toFixed(1)} s`;
-  saveSettings();
-});
-noiseFloor.addEventListener('input', () => {
-  noiseFloorVal.textContent = `${noiseFloor.value} dB`;
-  saveSettings();
-});
-minSilence.addEventListener('input', () => {
-  minSilenceVal.textContent = `${(minSilence.value/10).toFixed(1)} s`;
   saveSettings();
 });
 
 function saveSettings() {
   try {
     localStorage.setItem('splitpoint_settings', JSON.stringify({
-      noiseFloor: noiseFloor.value,
-      minSilence: minSilence.value,
-      mode: modeSelect.value,
       clipLength: clipLength.value
     }));
   } catch (e) { /* storage unavailable, ignore */ }
@@ -369,21 +325,9 @@ function saveSettings() {
 function restoreSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem('splitpoint_settings'));
-    if (saved) {
-      noiseFloor.value = saved.noiseFloor;
-      minSilence.value = saved.minSilence;
-      noiseFloorVal.textContent = `${noiseFloor.value} dB`;
-      minSilenceVal.textContent = `${(minSilence.value/10).toFixed(1)} s`;
-      if (saved.mode) {
-        modeSelect.value = saved.mode;
-        const isFast = saved.mode === 'fast';
-        fastControls.style.display = isFast ? 'flex' : 'none';
-        smartControls.style.display = isFast ? 'none' : 'flex';
-      }
-      if (saved.clipLength) {
-        clipLength.value = saved.clipLength;
-        clipLengthVal.textContent = `${parseFloat(clipLength.value).toFixed(1)} s`;
-      }
+    if (saved && saved.clipLength) {
+      clipLength.value = saved.clipLength;
+      clipLengthVal.textContent = `${parseFloat(clipLength.value).toFixed(1)} s`;
     }
   } catch (e) { /* no saved settings yet */ }
 }
@@ -432,7 +376,7 @@ function selectFile(file) {
     emptyNote.textContent = `Heads up — this file is ${sizeMB.toFixed(0)}MB. Processing happens entirely on your phone, so long or high-res videos can take a while and may stall on older devices. Consider trimming it shorter first if it hangs.`;
   } else {
     emptyNote.style.display = 'block';
-    emptyNote.textContent = 'No clips yet — tap "Split by audio" to get started.';
+    emptyNote.textContent = 'No clips yet — tap "Split into clips" to get started.';
   }
 }
 clearFile.addEventListener('click', () => {
@@ -465,11 +409,7 @@ processBtn.addEventListener('click', async () => {
     setStatus('Reading file…');
     await ffmpeg.writeFile(inputName, await fetchFile(currentFile));
 
-    if (modeSelect.value === 'fast') {
-      await processFast(inputName);
-    } else {
-      await processSmart(inputName);
-    }
+    await processFast(inputName);
 
     renderClips();
     setStatus('', false);
@@ -519,87 +459,11 @@ async function processFast(inputName) {
   await ffmpeg.deleteFile(inputName);
 }
 
-async function processSmart(inputName) {
-    setStatus('Scanning audio for pauses…');
-    const noiseDb = noiseFloor.value;
-    const minDur = (minSilence.value / 10).toFixed(2);
-
-    let logBuffer = [];
-    const listener = ({ message }) => logBuffer.push(message);
-    ffmpeg.on('log', listener);
-
-    await ffmpeg.exec([
-      '-i', inputName,
-      '-af', `silencedetect=noise=${noiseDb}dB:d=${minDur}`,
-      '-f', 'null', '-'
-    ]);
-
-    ffmpeg.off('log', listener);
-
-    // parse silence_start / silence_end from logs
-    const silences = [];
-    let pendingStart = null;
-    for (const line of logBuffer) {
-      const startMatch = line.match(/silence_start:\s*([\d.]+)/);
-      const endMatch = line.match(/silence_end:\s*([\d.]+)/);
-      if (startMatch) pendingStart = parseFloat(startMatch[1]);
-      if (endMatch && pendingStart !== null) {
-        silences.push({ start: pendingStart, end: parseFloat(endMatch[1]) });
-        pendingStart = null;
-      }
-    }
-
-    // get duration
-    let durationLine = logBuffer.find(l => l.includes('Duration:'));
-    let totalDuration = 0;
-    if (durationLine) {
-      const m = durationLine.match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
-      if (m) totalDuration = (+m[1])*3600 + (+m[2])*60 + parseFloat(m[3]);
-    }
-
-    // build segment boundaries: split at the midpoint of each silence gap
-    const cutPoints = silences.map(s => (s.start + s.end) / 2).filter(t => t > 1 && t < totalDuration - 1);
-    const boundaries = [0, ...cutPoints, totalDuration];
-
-    if (boundaries.length <= 2) {
-      emptyNote.textContent = 'No clear pauses found — try lowering the sensitivity or shortening the pause length.';
-      return;
-    }
-
-    setStatus(`Cutting ${boundaries.length - 1} clips…`);
-    progressTrack.classList.add('show');
-
-    for (let i = 0; i < boundaries.length - 1; i++) {
-      const start = boundaries[i];
-      const end = boundaries[i+1];
-      if (end - start < 0.8) continue; // skip near-zero slivers
-      const outName = `clip_${i}.mp4`;
-      progressFill.style.width = `${Math.round((i / (boundaries.length-1)) * 100)}%`;
-
-      await ffmpeg.exec([
-        '-ss', start.toFixed(2),
-        '-i', inputName,
-        '-to', (end - start).toFixed(2),
-        '-c', 'copy',
-        '-avoid_negative_ts', 'make_zero',
-        outName
-      ]);
-
-      const data = await ffmpeg.readFile(outName);
-      const blob = new Blob([data.buffer], { type: 'video/mp4' });
-      const url = URL.createObjectURL(blob);
-      clips.push({ url, blob, start, end, index: i, name: `clip_${sessionStamp}_${clips.length + 1}.mp4` });
-      await ffmpeg.deleteFile(outName);
-    }
-
-    progressFill.style.width = '100%';
-    await ffmpeg.deleteFile(inputName);
-}
 
 function renderClips() {
   if (clips.length === 0) {
     emptyNote.style.display = 'block';
-    emptyNote.textContent = 'No clips produced — try adjusting the sensitivity.';
+    emptyNote.textContent = 'No clips produced — try a different clip length.';
     resultsWrap.style.display = 'none';
     return;
   }
