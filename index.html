@@ -278,6 +278,7 @@
   <div class="empty-note" id="emptyNote">No clips yet — upload a video above to get started.</div>
 
 <script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script type="module">
 const $ = (id) => document.getElementById(id);
 const drop = $('drop'), fileInput = $('fileInput'), filenameRow = $('filenameRow'),
@@ -488,11 +489,13 @@ function renderClips() {
   clipCount.textContent = `${clips.length} clip${clips.length > 1 ? 's' : ''}`;
   clipList.innerHTML = '';
 
+  const allVideos = [];
+
   clips.forEach((clip, i) => {
     const card = document.createElement('div');
     card.className = 'clip-card';
     card.innerHTML = `
-      <video src="${clip.url}" muted playsinline preload="metadata"></video>
+      <video data-src="${clip.url}" muted playsinline preload="none"></video>
       <div class="clip-meta">
         <p class="clip-title">Clip ${i + 1}</p>
         <p class="clip-time">${fmtTime(clip.start)} – ${fmtTime(clip.end)} · ${(clip.end - clip.start).toFixed(1)}s</p>
@@ -503,22 +506,50 @@ function renderClips() {
       </div>
     `;
     const video = card.querySelector('video');
+    allVideos.push(video);
+
     video.addEventListener('click', () => {
+      // Only one clip decodes/plays at a time — reduces memory pressure and glitching.
+      allVideos.forEach(v => { if (v !== video) v.pause(); });
       if (video.paused) video.play(); else video.pause();
     });
     card.querySelector('.dl-btn').addEventListener('click', () => downloadClip(i));
     clipList.appendChild(card);
   });
+
+  // Load each video's source only when it's actually visible, unload when far off-screen.
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      const video = entry.target;
+      if (entry.isIntersecting) {
+        if (!video.src && video.dataset.src) {
+          video.preload = 'metadata';
+          video.src = video.dataset.src;
+        }
+      } else {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+      }
+    });
+  }, { rootMargin: '200px 0px' });
+
+  allVideos.forEach(v => observer.observe(v));
 }
 
 function downloadClip(i) {
   const clip = clips[i];
+  // iOS Safari routes video/mp4 blobs to a "Save Video" -> Photos action.
+  // Re-typing as a generic binary makes it download as a normal file instead.
+  const downloadBlob = new Blob([clip.blob], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(downloadBlob);
   const a = document.createElement('a');
-  a.href = clip.url;
+  a.href = url;
   a.download = clip.name;
   document.body.appendChild(a);
   a.click();
   a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
 selectAllBtn.addEventListener('click', () => {
@@ -528,12 +559,41 @@ selectAllBtn.addEventListener('click', () => {
   selectAllBtn.textContent = allChecked ? 'Select all' : 'Deselect all';
 });
 
-downloadSelectedBtn.addEventListener('click', () => {
+downloadSelectedBtn.addEventListener('click', async () => {
   const boxes = document.querySelectorAll('.clip-check:checked');
   if (boxes.length === 0) { alert('Check the clips you want first.'); return; }
-  boxes.forEach((b, n) => {
-    setTimeout(() => downloadClip(parseInt(b.dataset.idx)), n * 400);
-  });
+
+  if (boxes.length === 1) {
+    downloadClip(parseInt(boxes[0].dataset.idx));
+    return;
+  }
+
+  const originalLabel = downloadSelectedBtn.textContent;
+  downloadSelectedBtn.textContent = 'Zipping…';
+  downloadSelectedBtn.disabled = true;
+
+  try {
+    const zip = new JSZip();
+    boxes.forEach(b => {
+      const clip = clips[parseInt(b.dataset.idx)];
+      zip.file(clip.name, clip.blob);
+    });
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    const url = URL.createObjectURL(zipBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `clips_${sessionStamp}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (e) {
+    appendLog('ZIP ERROR: ' + (e?.message || e));
+    alert('Could not create the zip file — check the technical log below.');
+  }
+
+  downloadSelectedBtn.textContent = originalLabel;
+  downloadSelectedBtn.disabled = false;
 });
 </script>
 </body>
