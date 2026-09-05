@@ -117,7 +117,7 @@
       </div>
     </div>
 
-    <button class="primary" id="processBtn" disabled>Split into clips</button>
+    <button class="primary" id="processBtn">Split into clips</button>
 
     <div class="status" id="statusRow">
       <div class="spinner"></div>
@@ -127,8 +127,8 @@
       <div class="progress-fill" id="progressFill"></div>
     </div>
 
-    <div class="log-toggle" id="logToggle" style="display:block;">hide technical log</div>
-    <div class="log show" id="log"></div>
+    <div class="log-toggle" id="logToggle" style="display:none;">show technical log</div>
+    <div class="log" id="log"></div>
   </div>
 
   <div id="resultsWrap" style="display:none;">
@@ -144,14 +144,12 @@
   </div>
 
   <div class="empty-note" id="emptyNote">No clips yet — upload a video above to get started.</div>
-  <p style="text-align:center; color:var(--text-dim); font-size:0.68rem; margin-top:24px;">build: ffmpeg-umd-v3</p>
+  <p style="text-align:center; color:var(--text-dim); font-size:0.68rem; margin-top:24px;">build: lightweight-remux-v3-bframe-fix</p>
 
+<script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-<script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
-<script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
 <script type="module">
-const { FFmpeg } = FFmpegWASM;
-const { fetchFile } = FFmpegUtil;
+import { Muxer, ArrayBufferTarget } from 'https://cdn.jsdelivr.net/npm/mp4-muxer@4/build/mp4-muxer.mjs';
 
 const $ = (id) => document.getElementById(id);
 const drop = $('drop'), fileInput = $('fileInput'), filenameRow = $('filenameRow'),
@@ -163,10 +161,8 @@ const drop = $('drop'), fileInput = $('fileInput'), filenameRow = $('filenameRow
       logToggle = $('logToggle'), log = $('log'),
       clipLength = $('clipLength'), clipLengthVal = $('clipLengthVal');
 
-let ffmpeg = null;
-let ready = false;
 let currentFile = null;
-let clips = []; // {url, blob, start, end, index, name}
+let clips = [];
 let sessionStamp = '';
 
 function setStatus(msg, show = true) {
@@ -195,9 +191,8 @@ clipLength.addEventListener('input', () => {
 });
 
 function saveSettings() {
-  try {
-    localStorage.setItem('splitpoint_settings', JSON.stringify({ clipLength: clipLength.value }));
-  } catch (e) { /* storage unavailable, ignore */ }
+  try { localStorage.setItem('splitpoint_settings', JSON.stringify({ clipLength: clipLength.value })); }
+  catch (e) { /* ignore */ }
 }
 function restoreSettings() {
   try {
@@ -210,76 +205,14 @@ function restoreSettings() {
 }
 restoreSettings();
 
-// Cache the ~25MB engine permanently after the first download, so every
-// visit after the first loads it from local cache instead of the network.
-async function loadCachedURL(url, mimeType) {
-  appendLog(`[load] requesting ${url.split('/').pop()}`);
-  try {
-    const cache = await caches.open('splitpoint-engine-v2-umd');
-    appendLog('[load] cache opened');
-    let response = await cache.match(url);
-    if (!response) {
-      appendLog('[load] not in cache — fetching from network…');
-      response = await fetch(url);
-      appendLog(`[load] fetch responded, status ${response.status}`);
-      if (response.ok) {
-        await cache.put(url, response.clone());
-        appendLog('[load] stored in cache');
-      }
-    } else {
-      appendLog('[load] found in cache, using it');
-    }
-    const blob = await response.blob();
-    appendLog(`[load] blob ready, ${(blob.size / 1024 / 1024).toFixed(1)}MB`);
-    return URL.createObjectURL(new Blob([blob], { type: mimeType }));
-  } catch (e) {
-    appendLog('[load] CACHE ERROR: ' + (e?.message || e) + ' — falling back to direct fetch');
-    const resp = await fetch(url);
-    const blob = await resp.blob();
-    appendLog(`[load] fallback blob ready, ${(blob.size / 1024 / 1024).toFixed(1)}MB`);
-    return URL.createObjectURL(new Blob([blob], { type: mimeType }));
-  }
-}
-
-function withTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms/1000}s — something is stuck, not just slow`)), ms))
-  ]);
-}
-
-async function initFFmpeg() {
-  log.classList.add('show');
-  logToggle.style.display = 'block';
-  logToggle.textContent = 'hide technical log';
-  appendLog('[init] starting engine load…');
-
-  ffmpeg = new FFmpeg();
-  ffmpeg.on('log', ({ message }) => appendLog(message));
-  const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
-
-  const alreadyCached = await caches.open('splitpoint-engine-v2-umd')
-    .then(c => c.match(`${baseURL}/ffmpeg-core.wasm`))
-    .catch(() => null);
-  appendLog(`[init] already cached: ${!!alreadyCached}`);
-  setStatus(alreadyCached ? 'Loading engine…' : 'Downloading engine (one-time only — instant every time after)…');
-  statusRow.classList.add('show');
-
-  const coreURL = await withTimeout(loadCachedURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'), 30000, 'Loading core.js');
-  const wasmURL = await withTimeout(loadCachedURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'), 30000, 'Loading .wasm');
-
-  appendLog('[init] calling ffmpeg.load()…');
-  await withTimeout(ffmpeg.load({ coreURL, wasmURL }), 30000, 'ffmpeg.load()');
-  appendLog('[init] ffmpeg.load() completed');
-
-  ready = true;
+// mp4box.js and mp4-muxer are small (~200KB combined) and ready as soon as
+// the page loads — no multi-megabyte engine download step needed.
+let ready = typeof MP4Box !== 'undefined';
+if (!ready) {
+  setStatus('Library failed to load — check your connection and reload.');
+} else {
   setStatus('', false);
-  processBtn.disabled = !currentFile;
 }
-initFFmpeg().catch(err => {
-  setStatus('Engine failed to load — see technical log below.');
-  appendLog('[init] FATAL: ' + (err?.message || err));
-});
 
 drop.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', (e) => {
@@ -291,12 +224,11 @@ function selectFile(file) {
   filenameText.textContent = `${file.name} · ${(file.size / (1024*1024)).toFixed(1)} MB`;
   filenameRow.style.display = 'flex';
   drop.style.display = 'none';
-  processBtn.disabled = !ready;
 
   const sizeMB = file.size / (1024*1024);
   emptyNote.style.display = 'block';
-  if (sizeMB > 150) {
-    emptyNote.textContent = `Heads up — this file is ${sizeMB.toFixed(0)}MB. Processing happens entirely on your phone, so long or high-res videos can take a while and may stall on older devices.`;
+  if (sizeMB > 400) {
+    emptyNote.textContent = `Heads up — this file is ${sizeMB.toFixed(0)}MB. It all loads into memory at once, so very large files may be slow or stall on older phones.`;
   } else {
     emptyNote.textContent = 'No clips yet — tap "Split into clips" to get started.';
   }
@@ -306,11 +238,13 @@ clearFile.addEventListener('click', () => {
   fileInput.value = '';
   filenameRow.style.display = 'none';
   drop.style.display = 'block';
-  processBtn.disabled = true;
 });
 
 processBtn.addEventListener('click', async () => {
-  if (!currentFile || !ready) return;
+  if (!currentFile || !ready) {
+    if (!currentFile) alert('Choose a video first.');
+    return;
+  }
 
   const now = new Date();
   const pad = (n) => String(n).padStart(2, '0');
@@ -324,63 +258,136 @@ processBtn.addEventListener('click', async () => {
   emptyNote.textContent = 'Working on it…';
   processBtn.disabled = true;
   progressTrack.classList.add('show');
-  progressFill.style.width = '5%';
+  progressFill.style.width = '10%';
 
   try {
-    const inputName = 'input' + (currentFile.name.match(/\.\w+$/)?.[0] || '.mp4');
-    setStatus('Reading file…');
-    await ffmpeg.writeFile(inputName, await fetchFile(currentFile));
-    await splitFixedLength(inputName);
+    await processFile(currentFile);
     renderClips();
     setStatus('', false);
   } catch (err) {
     appendLog('ERROR: ' + (err?.message || err));
-    emptyNote.textContent = 'Something went wrong processing this file. Check the technical log below, or try a different video.';
+    emptyNote.textContent = 'Something went wrong reading this file. Check the technical log below, or try a different video.';
     setStatus('', false);
   }
   progressTrack.classList.remove('show');
   processBtn.disabled = false;
 });
 
-async function splitFixedLength(inputName) {
-  setStatus('Slicing into clips…');
+// Groups samples into keyframe-aligned batches close to the target length.
+// Walks samples in their natural decode order (required for correct playback
+// when a video uses B-frames) and uses presentation time (cts) only to judge
+// roughly how much real playback time has accumulated.
+function groupIntoClips(samples, trackTimescale, segLenSeconds) {
+  const segLenTS = segLenSeconds * trackTimescale;
+  const groups = [];
+  let current = [];
+  let groupStartCts = null;
+  for (const s of samples) {
+    if (current.length === 0) {
+      current.push(s);
+      groupStartCts = s.cts;
+      continue;
+    }
+    const elapsed = s.cts - groupStartCts;
+    if (elapsed >= segLenTS && s.is_sync) {
+      groups.push(current);
+      current = [s];
+      groupStartCts = s.cts;
+    } else {
+      current.push(s);
+    }
+  }
+  if (current.length) groups.push(current);
+  return groups;
+}
+
+// Builds one standalone MP4 file from a group of already-encoded samples —
+// pure container writing, no decoding or re-encoding of the video itself.
+// Samples are fed in decode order with their presentation (cts) timestamps;
+// the muxer derives correct internal decode timing from that order itself.
+function buildClipFromSamples(sampleGroup, trackTimescale, codecFamily, width, height, description) {
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: { codec: codecFamily, width, height, description },
+    fastStart: 'in-memory'
+  });
+
+  const ctsOffset = Math.min(...sampleGroup.map(s => s.cts));
+  for (const s of sampleGroup) {
+    const relCts = s.cts - ctsOffset;
+    const timestampUs = Math.round((relCts / trackTimescale) * 1e6);
+    const durationUs = Math.round((s.duration / trackTimescale) * 1e6);
+    muxer.addVideoChunkRaw(s.data, s.is_sync ? 'key' : 'delta', timestampUs, durationUs);
+  }
+  muxer.finalize();
+  return muxer.target.buffer;
+}
+
+async function processFile(file) {
   const segLen = parseFloat(clipLength.value);
-  const pattern = 'out_%03d.mp4';
+  const mp4boxfile = MP4Box.createFile();
+  const allSamples = [];
+  let trackTimescale = null, codecFamily = null, description = null, width = null, height = null;
+  let errorMsg = null;
 
-  await ffmpeg.exec([
-    '-i', inputName,
-    '-c:v', 'copy',
-    '-an',                 // strip audio — video-only clips, no re-encode
-    '-map', '0:v:0',
-    '-f', 'segment',
-    '-segment_time', segLen.toFixed(2),
-    '-reset_timestamps', '1',
-    pattern
-  ]);
+  mp4boxfile.onError = (e) => { errorMsg = 'mp4box: ' + e; };
 
-  const files = (await ffmpeg.listDir('/'))
-    .filter(f => f.name.startsWith('out_') && f.name.endsWith('.mp4'))
-    .sort((a, b) => a.name.localeCompare(b.name));
+  mp4boxfile.onReady = (info) => {
+    setStatus('Reading codec info…');
+    const vTrack = info.videoTracks && info.videoTracks[0];
+    if (!vTrack) { errorMsg = 'No video track found in this file.'; return; }
+    trackTimescale = vTrack.timescale;
 
-  if (files.length === 0) {
-    throw new Error('No clips were produced — this file\'s format may not be supported.');
+    const trak = mp4boxfile.getTrackById(vTrack.id);
+    const entry = trak.mdia.minf.stbl.stsd.entries[0];
+    if (entry.avcC || entry.hvcC) {
+      const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
+      if (entry.avcC) { entry.avcC.write(stream); codecFamily = 'avc'; }
+      else { entry.hvcC.write(stream); codecFamily = 'hevc'; }
+      description = new Uint8Array(stream.buffer, 8);
+    } else {
+      errorMsg = "This video's codec isn't H.264 or HEVC, which is all this tool currently supports.";
+      return;
+    }
+    width = entry.width;
+    height = entry.height;
+
+    setStatus('Extracting frames…');
+    mp4boxfile.onSamples = (id, user, samples) => {
+      if (id !== vTrack.id) return;
+      allSamples.push(...samples);
+    };
+    mp4boxfile.setExtractionOptions(vTrack.id, null, { nbSamples: 100000 });
+    mp4boxfile.start();
+  };
+
+  setStatus('Reading file…');
+  const arrayBuffer = await file.arrayBuffer();
+  arrayBuffer.fileStart = 0;
+  mp4boxfile.appendBuffer(arrayBuffer);
+  mp4boxfile.flush();
+
+  if (errorMsg) throw new Error(errorMsg);
+  if (allSamples.length === 0) throw new Error('No frames could be extracted from this file.');
+
+  const groups = groupIntoClips(allSamples, trackTimescale, segLen);
+
+  setStatus(`Building ${groups.length} clips…`);
+  for (let i = 0; i < groups.length; i++) {
+    try {
+      const buffer = buildClipFromSamples(groups[i], trackTimescale, codecFamily, width, height, description);
+      const blob = new Blob([buffer], { type: 'video/mp4' });
+      const url = URL.createObjectURL(blob);
+      const ctsValues = groups[i].map(s => s.cts);
+      const start = Math.min(...ctsValues) / trackTimescale;
+      const endSample = groups[i].reduce((max, s) => (s.cts + s.duration > max.cts + max.duration ? s : max));
+      const end = (endSample.cts + endSample.duration) / trackTimescale;
+      clips.push({ url, blob, start, end, index: i, name: `clip_${sessionStamp}_${i + 1}.mp4` });
+    } catch (e) {
+      appendLog(`[clip ${i + 1}] failed: ` + (e?.message || e));
+    }
+    progressFill.style.width = `${Math.round(((i + 1) / groups.length) * 100)}%`;
   }
-
-  for (let i = 0; i < files.length; i++) {
-    const data = await ffmpeg.readFile(files[i].name);
-    const blob = new Blob([data.buffer], { type: 'video/mp4' });
-    const url = URL.createObjectURL(blob);
-    clips.push({
-      url, blob,
-      start: i * segLen,
-      end: (i + 1) * segLen,
-      index: i,
-      name: `clip_${sessionStamp}_${i + 1}.mp4`
-    });
-    await ffmpeg.deleteFile(files[i].name);
-    progressFill.style.width = `${Math.round(((i + 1) / files.length) * 100)}%`;
-  }
-  await ffmpeg.deleteFile(inputName);
 }
 
 function renderClips() {
@@ -413,7 +420,6 @@ function renderClips() {
     `;
     const video = card.querySelector('video');
     allVideos.push(video);
-
     video.addEventListener('click', () => {
       allVideos.forEach(v => { if (v !== video) v.pause(); });
       if (video.paused) video.play(); else video.pause();
@@ -443,8 +449,6 @@ function renderClips() {
 
 function downloadClip(i) {
   const clip = clips[i];
-  // iOS Safari routes video/mp4 blobs to a "Save Video" -> Photos action.
-  // Re-typing as a generic binary makes it download as a normal file instead.
   const downloadBlob = new Blob([clip.blob], { type: 'application/octet-stream' });
   const url = URL.createObjectURL(downloadBlob);
   const a = document.createElement('a');
