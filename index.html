@@ -333,15 +333,32 @@ function restoreSettings() {
 }
 restoreSettings();
 
+async function loadCachedURL(url, mimeType) {
+  try {
+    const cache = await caches.open('splitpoint-engine-v1');
+    let response = await cache.match(url);
+    if (!response) {
+      response = await fetch(url);
+      if (response.ok) await cache.put(url, response.clone());
+    }
+    const blob = await response.blob();
+    return URL.createObjectURL(new Blob([blob], { type: mimeType }));
+  } catch (e) {
+    // Cache Storage unavailable (rare) — fall back to a direct fetch each time
+    return toBlobURL(url, mimeType);
+  }
+}
+
 async function initFFmpeg() {
   ffmpeg = new FFmpeg();
   ffmpeg.on('log', ({ message }) => appendLog(message));
   const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
-  setStatus('Loading video engine (first time only)…');
+  const alreadyCached = await caches.open('splitpoint-engine-v1').then(c => c.match(`${baseURL}/ffmpeg-core.wasm`)).catch(() => null);
+  setStatus(alreadyCached ? 'Loading engine…' : 'Downloading engine (one-time only — instant every time after)…');
   statusRow.classList.add('show');
   await ffmpeg.load({
-    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+    coreURL: await loadCachedURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+    wasmURL: await loadCachedURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
   });
   ready = true;
   setStatus('', false);
