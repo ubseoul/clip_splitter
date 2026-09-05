@@ -127,8 +127,8 @@
       <div class="progress-fill" id="progressFill"></div>
     </div>
 
-    <div class="log-toggle" id="logToggle" style="display:none;">show technical log</div>
-    <div class="log" id="log"></div>
+    <div class="log-toggle" id="logToggle" style="display:block;">hide technical log</div>
+    <div class="log show" id="log"></div>
   </div>
 
   <div id="resultsWrap" style="display:none;">
@@ -144,7 +144,7 @@
   </div>
 
   <div class="empty-note" id="emptyNote">No clips yet — upload a video above to get started.</div>
-  <p style="text-align:center; color:var(--text-dim); font-size:0.68rem; margin-top:24px;">build: ffmpeg-final-v1</p>
+  <p style="text-align:center; color:var(--text-dim); font-size:0.68rem; margin-top:24px;">build: ffmpeg-final-v2-diagnostic</p>
 
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script type="module">
@@ -211,43 +211,72 @@ restoreSettings();
 // Cache the ~25MB engine permanently after the first download, so every
 // visit after the first loads it from local cache instead of the network.
 async function loadCachedURL(url, mimeType) {
+  appendLog(`[load] requesting ${url.split('/').pop()}`);
   try {
     const cache = await caches.open('splitpoint-engine-v1');
+    appendLog('[load] cache opened');
     let response = await cache.match(url);
     if (!response) {
+      appendLog('[load] not in cache — fetching from network…');
       response = await fetch(url);
-      if (response.ok) await cache.put(url, response.clone());
+      appendLog(`[load] fetch responded, status ${response.status}`);
+      if (response.ok) {
+        await cache.put(url, response.clone());
+        appendLog('[load] stored in cache');
+      }
+    } else {
+      appendLog('[load] found in cache, using it');
     }
     const blob = await response.blob();
+    appendLog(`[load] blob ready, ${(blob.size / 1024 / 1024).toFixed(1)}MB`);
     return URL.createObjectURL(new Blob([blob], { type: mimeType }));
   } catch (e) {
-    appendLog('CACHE WARNING: ' + (e?.message || e) + ' — falling back to direct fetch');
+    appendLog('[load] CACHE ERROR: ' + (e?.message || e) + ' — falling back to direct fetch');
     const resp = await fetch(url);
     const blob = await resp.blob();
+    appendLog(`[load] fallback blob ready, ${(blob.size / 1024 / 1024).toFixed(1)}MB`);
     return URL.createObjectURL(new Blob([blob], { type: mimeType }));
   }
 }
 
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms/1000}s — something is stuck, not just slow`)), ms))
+  ]);
+}
+
 async function initFFmpeg() {
+  log.classList.add('show');
+  logToggle.style.display = 'block';
+  logToggle.textContent = 'hide technical log';
+  appendLog('[init] starting engine load…');
+
   ffmpeg = new FFmpeg();
   ffmpeg.on('log', ({ message }) => appendLog(message));
   const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+
   const alreadyCached = await caches.open('splitpoint-engine-v1')
     .then(c => c.match(`${baseURL}/ffmpeg-core.wasm`))
     .catch(() => null);
+  appendLog(`[init] already cached: ${!!alreadyCached}`);
   setStatus(alreadyCached ? 'Loading engine…' : 'Downloading engine (one-time only — instant every time after)…');
   statusRow.classList.add('show');
-  await ffmpeg.load({
-    coreURL: await loadCachedURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-    wasmURL: await loadCachedURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-  });
+
+  const coreURL = await withTimeout(loadCachedURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'), 30000, 'Loading core.js');
+  const wasmURL = await withTimeout(loadCachedURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'), 30000, 'Loading .wasm');
+
+  appendLog('[init] calling ffmpeg.load()…');
+  await withTimeout(ffmpeg.load({ coreURL, wasmURL }), 30000, 'ffmpeg.load()');
+  appendLog('[init] ffmpeg.load() completed');
+
   ready = true;
   setStatus('', false);
   processBtn.disabled = !currentFile;
 }
 initFFmpeg().catch(err => {
-  setStatus('Engine failed to load — check your connection and reload.');
-  appendLog('INIT ERROR: ' + (err?.message || err));
+  setStatus('Engine failed to load — see technical log below.');
+  appendLog('[init] FATAL: ' + (err?.message || err));
 });
 
 drop.addEventListener('click', () => fileInput.click());
