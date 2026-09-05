@@ -144,7 +144,7 @@
   </div>
 
   <div class="empty-note" id="emptyNote">No clips yet — upload a video above to get started.</div>
-  <p style="text-align:center; color:var(--text-dim); font-size:0.68rem; margin-top:24px;">build: playback-record-v1</p>
+  <p style="text-align:center; color:var(--text-dim); font-size:0.68rem; margin-top:24px;">build: playback-record-v2-cfr</p>
 
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script type="module">
@@ -330,17 +330,26 @@ async function processFile(file, mimeType) {
 
 function captureRange(video, canvas, ctx, start, end, mimeType) {
   return new Promise((resolve, reject) => {
-    const stream = canvas.captureStream(30);
-    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 4_000_000 });
+    // captureStream() with no fps argument puts the track in "manual" mode —
+    // it only produces a frame when we explicitly call requestFrame(). Pacing
+    // those calls on a strict timer (not requestAnimationFrame, which follows
+    // the screen's variable refresh timing) gives genuinely evenly-spaced
+    // frames — constant frame rate — which is what editing apps like CapCut
+    // expect for smooth scrubbing and preview.
+    const targetFps = 30;
+    const frameIntervalMs = 1000 / targetFps;
+    const stream = canvas.captureStream();
+    const track = stream.getVideoTracks()[0];
+    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 5_000_000 });
     const chunks = [];
-    let rafId = null;
+    let intervalId = null;
     let finished = false;
 
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
     recorder.onerror = (e) => {
       if (finished) return;
       finished = true;
-      cancelAnimationFrame(rafId);
+      clearInterval(intervalId);
       reject(new Error('Recorder error: ' + (e.error?.message || e)));
     };
     recorder.onstop = () => {
@@ -349,14 +358,14 @@ function captureRange(video, canvas, ctx, start, end, mimeType) {
       resolve(new Blob(chunks, { type: mimeType }));
     };
 
-    function drawLoop() {
+    function tick() {
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      track.requestFrame();
       if (video.currentTime >= end - 0.02 || video.ended) {
+        clearInterval(intervalId);
         video.pause();
         if (recorder.state === 'recording') recorder.stop();
-        return;
       }
-      rafId = requestAnimationFrame(drawLoop);
     }
 
     video.currentTime = start;
@@ -364,15 +373,16 @@ function captureRange(video, canvas, ctx, start, end, mimeType) {
       video.onseeked = null;
       recorder.start();
       video.play().then(() => {
-        rafId = requestAnimationFrame(drawLoop);
+        intervalId = setInterval(tick, frameIntervalMs);
       }).catch(reject);
     };
 
     // Safety timeout in case a seek or the end condition never fires
     setTimeout(() => {
-      if (!finished && recorder.state === 'recording') {
+      if (!finished) {
+        clearInterval(intervalId);
         video.pause();
-        recorder.stop();
+        if (recorder.state === 'recording') recorder.stop();
       }
     }, (end - start) * 1000 + 3000);
   });
