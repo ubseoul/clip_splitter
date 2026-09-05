@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Splitpoint — audio-based clip splitter</title>
+<style>
+  :root{
+    --bg: #0f1210;
+    --bg-panel: #161b18;
+    --bg-card: #1b211d;
+    --line: #2a322c;
+    --text: #eef2ee;
+    --text-dim: #97a399;
+    --accent: #c9ff3d;
+    --accent-dim: #7c9a2a;
+    --danger: #ff6b5e;
+    --radius: 10px;
+    font-size: 16px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body { padding: 20px 16px 60px; max-width: 640px; margin: 0 auto; }
+
+  .brand {
+    display: flex; align-items: baseline; gap: 8px;
+    margin-bottom: 4px;
+  }
+  .brand .mark {
+    width: 10px; height: 10px; border-radius: 2px;
+    background: var(--accent);
+    transform: rotate(45deg);
+    flex: none;
+  }
+  .brand h1 {
+    font-size: 1.05rem; font-weight: 650; letter-spacing: -0.01em; margin: 0;
+  }
+  .tagline { color: var(--text-dim); font-size: 0.85rem; margin: 0 0 24px; line-height: 1.4; }
+
+  .panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 18px;
+    margin-bottom: 16px;
+  }
+
+  .drop {
+    border: 1.5px dashed var(--line);
+    border-radius: var(--radius);
+    padding: 32px 16px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .drop.active { border-color: var(--accent); background: rgba(201,255,61,0.04); }
+  .drop svg { margin-bottom: 10px; opacity: 0.7; }
+  .drop-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 4px; }
+  .drop-sub { color: var(--text-dim); font-size: 0.8rem; }
+  input[type=file] { display: none; }
+
+  .filename {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 0.85rem; color: var(--text-dim);
+    margin-top: 10px;
+  }
+  .filename button {
+    background: none; border: none; color: var(--danger);
+    font-size: 0.8rem; cursor: pointer; padding: 4px;
+  }
+
+  .controls-row {
+    display: flex; gap: 10px; margin-top: 14px;
+  }
+  .field {
+    flex: 1;
+    display: flex; flex-direction: column; gap: 5px;
+  }
+  .field label {
+    font-size: 0.72rem; color: var(--text-dim); text-transform: none;
+  }
+  .field input[type=range] {
+    width: 100%; accent-color: var(--accent);
+  }
+  .field .val { font-size: 0.78rem; color: var(--text); }
+
+  button.primary {
+    width: 100%;
+    background: var(--accent);
+    color: #10130f;
+    border: none;
+    border-radius: 8px;
+    padding: 13px;
+    font-size: 0.95rem;
+    font-weight: 650;
+    cursor: pointer;
+    margin-top: 16px;
+    transition: transform 0.1s ease, opacity 0.15s ease;
+  }
+  button.primary:active { transform: scale(0.98); }
+  button.primary:disabled {
+    opacity: 0.35; cursor: not-allowed;
+  }
+  button.secondary {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+
+  .status {
+    font-size: 0.82rem; color: var(--text-dim);
+    margin-top: 12px;
+    display: none;
+    align-items: center; gap: 8px;
+  }
+  .status.show { display: flex; }
+  .spinner {
+    width: 13px; height: 13px;
+    border: 2px solid var(--line);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex: none;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .progress-track {
+    height: 4px; background: var(--line); border-radius: 2px;
+    overflow: hidden; margin-top: 10px; display: none;
+  }
+  .progress-track.show { display: block; }
+  .progress-fill {
+    height: 100%; background: var(--accent); width: 0%;
+    transition: width 0.2s ease;
+  }
+
+  .section-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin: 28px 0 12px;
+  }
+  .section-head h2 {
+    font-size: 0.95rem; font-weight: 650; margin: 0;
+  }
+  .section-head .count { color: var(--text-dim); font-size: 0.8rem; }
+
+  .clip-card {
+    background: var(--bg-card);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 12px;
+    margin-bottom: 10px;
+    display: flex; gap: 12px; align-items: flex-start;
+  }
+  .clip-card video {
+    width: 108px; height: 108px;
+    border-radius: 7px;
+    background: #000;
+    object-fit: cover;
+    flex: none;
+  }
+  .clip-meta { flex: 1; min-width: 0; }
+  .clip-title {
+    font-size: 0.88rem; font-weight: 600; margin: 0 0 3px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .clip-time { color: var(--text-dim); font-size: 0.78rem; margin: 0 0 10px; }
+  .clip-actions { display: flex; gap: 8px; }
+  .clip-actions label {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 0.8rem; color: var(--text-dim);
+    cursor: pointer;
+  }
+  .clip-actions input[type=checkbox] {
+    width: 16px; height: 16px; accent-color: var(--accent);
+  }
+  .dl-btn {
+    background: none; border: 1px solid var(--line);
+    color: var(--text); border-radius: 6px;
+    padding: 5px 10px; font-size: 0.76rem; cursor: pointer;
+  }
+
+  .empty-note {
+    text-align: center; color: var(--text-dim);
+    font-size: 0.82rem; padding: 20px 0;
+  }
+
+  .footer-actions {
+    display: flex; gap: 10px; margin-top: 4px;
+  }
+  .footer-actions button.primary { margin-top: 0; }
+
+  .log-toggle {
+    font-size: 0.75rem; color: var(--text-dim);
+    text-align: center; margin-top: 18px; cursor: pointer;
+    text-decoration: underline; text-underline-offset: 2px;
+  }
+  .log {
+    display: none;
+    background: #0a0c0a;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px;
+    font-family: ui-monospace, monospace;
+    font-size: 0.68rem;
+    color: var(--text-dim);
+    max-height: 140px;
+    overflow-y: auto;
+    margin-top: 10px;
+    white-space: pre-wrap;
+  }
+  .log.show { display: block; }
+</style>
+</head>
+<body>
+
+  <div class="brand">
+    <div class="mark"></div>
+    <h1>Splitpoint</h1>
+  </div>
+  <p class="tagline">Upload a video, it finds the natural pauses in the audio, and splits it into clips you can preview and keep.</p>
+
+  <div class="panel">
+    <div class="drop" id="drop">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#c9ff3d" stroke-width="1.6"><path d="M12 16V4M12 4l-4 4M12 4l4 4"/><path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
+      <div class="drop-title">Choose a video</div>
+      <div class="drop-sub">Opens your camera roll · MP4 or MOV</div>
+      <input type="file" id="fileInput" accept="video/*">
+    </div>
+    <div class="filename" id="filenameRow" style="display:none;">
+      <span id="filenameText"></span>
+      <button id="clearFile">Remove</button>
+    </div>
+
+    <div class="controls-row">
+      <div class="field">
+        <label>Silence sensitivity (dB)</label>
+        <input type="range" id="noiseFloor" min="-50" max="-15" value="-30">
+        <span class="val" id="noiseFloorVal">-30 dB</span>
+      </div>
+      <div class="field">
+        <label>Min pause length</label>
+        <input type="range" id="minSilence" min="2" max="15" value="5">
+        <span class="val" id="minSilenceVal">0.5 s</span>
+      </div>
+    </div>
+
+    <button class="primary" id="processBtn" disabled>Split by audio</button>
+
+    <div class="status" id="statusRow">
+      <div class="spinner"></div>
+      <span id="statusText">Loading engine…</span>
+    </div>
+    <div class="progress-track" id="progressTrack">
+      <div class="progress-fill" id="progressFill"></div>
+    </div>
+
+    <div class="log-toggle" id="logToggle" style="display:none;">show engine log</div>
+    <div class="log" id="log"></div>
+  </div>
+
+  <div id="resultsWrap" style="display:none;">
+    <div class="section-head">
+      <h2>Clips</h2>
+      <span class="count" id="clipCount"></span>
+    </div>
+    <div id="clipList"></div>
+    <div class="footer-actions">
+      <button class="secondary" id="selectAllBtn">Select all</button>
+      <button class="primary" id="downloadSelectedBtn">Download selected</button>
+    </div>
+  </div>
+
+  <div class="empty-note" id="emptyNote">No clips yet — upload a video above to get started.</div>
+
+<script type="module">
+import { FFmpeg } from 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
+import { toBlobURL, fetchFile } from 'https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js';
+
+const $ = (id) => document.getElementById(id);
+const drop = $('drop'), fileInput = $('fileInput'), filenameRow = $('filenameRow'),
+      filenameText = $('filenameText'), clearFile = $('clearFile'),
+      processBtn = $('processBtn'), statusRow = $('statusRow'), statusText = $('statusText'),
+      progressTrack = $('progressTrack'), progressFill = $('progressFill'),
+      resultsWrap = $('resultsWrap'), clipList = $('clipList'), clipCount = $('clipCount'),
+      emptyNote = $('emptyNote'), selectAllBtn = $('selectAllBtn'), downloadSelectedBtn = $('downloadSelectedBtn'),
+      noiseFloor = $('noiseFloor'), noiseFloorVal = $('noiseFloorVal'),
+      minSilence = $('minSilence'), minSilenceVal = $('minSilenceVal'),
+      logToggle = $('logToggle'), log = $('log');
+
+let ffmpeg = null;
+let ready = false;
+let currentFile = null;
+let clips = []; // {url, blob, start, end, index}
+
+function setStatus(msg, show=true) {
+  statusText.textContent = msg;
+  statusRow.classList.toggle('show', show);
+}
+function appendLog(line) {
+  log.textContent += line + '\n';
+  log.scrollTop = log.scrollHeight;
+}
+function fmtTime(s) {
+  const m = Math.floor(s / 60);
+  const sec = (s % 60).toFixed(1);
+  return `${m}:${sec.padStart(4,'0')}`;
+}
+
+noiseFloor.addEventListener('input', () => noiseFloorVal.textContent = `${noiseFloor.value} dB`);
+minSilence.addEventListener('input', () => minSilenceVal.textContent = `${(minSilence.value/10).toFixed(1)} s`);
+
+async function initFFmpeg() {
+  ffmpeg = new FFmpeg();
+  ffmpeg.on('log', ({ message }) => appendLog(message));
+  const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+  setStatus('Loading video engine (first time only)…');
+  statusRow.classList.add('show');
+  await ffmpeg.load({
+    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+  });
+  ready = true;
+  setStatus('', false);
+  logToggle.style.display = 'block';
+}
+initFFmpeg().catch(err => {
+  setStatus('Engine failed to load — check your connection and reload.');
+  appendLog('INIT ERROR: ' + err.message);
+});
+
+logToggle.addEventListener('click', () => {
+  log.classList.toggle('show');
+  logToggle.textContent = log.classList.contains('show') ? 'hide engine log' : 'show engine log';
+});
+
+drop.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', (e) => {
+  if (e.target.files[0]) selectFile(e.target.files[0]);
+});
+
+function selectFile(file) {
+  currentFile = file;
+  filenameText.textContent = `${file.name} · ${(file.size / (1024*1024)).toFixed(1)} MB`;
+  filenameRow.style.display = 'flex';
+  drop.style.display = 'none';
+  processBtn.disabled = !ready;
+}
+clearFile.addEventListener('click', () => {
+  currentFile = null;
+  fileInput.value = '';
+  filenameRow.style.display = 'none';
+  drop.style.display = 'block';
+  processBtn.disabled = true;
+});
+
+processBtn.addEventListener('click', async () => {
+  if (!currentFile || !ready) return;
+  clipList.innerHTML = '';
+  clips.forEach(c => URL.revokeObjectURL(c.url));
+  clips = [];
+  resultsWrap.style.display = 'none';
+  emptyNote.style.display = 'block';
+  emptyNote.textContent = 'Working on it…';
+  processBtn.disabled = true;
+
+  try {
+    const inputName = 'input' + (currentFile.name.match(/\.\w+$/)?.[0] || '.mp4');
+    setStatus('Reading file…');
+    await ffmpeg.writeFile(inputName, await fetchFile(currentFile));
+
+    setStatus('Scanning audio for pauses…');
+    const noiseDb = noiseFloor.value;
+    const minDur = (minSilence.value / 10).toFixed(2);
+
+    let logBuffer = [];
+    const listener = ({ message }) => logBuffer.push(message);
+    ffmpeg.on('log', listener);
+
+    await ffmpeg.exec([
+      '-i', inputName,
+      '-af', `silencedetect=noise=${noiseDb}dB:d=${minDur}`,
+      '-f', 'null', '-'
+    ]);
+
+    ffmpeg.off('log', listener);
+
+    // parse silence_start / silence_end from logs
+    const silences = [];
+    let pendingStart = null;
+    for (const line of logBuffer) {
+      const startMatch = line.match(/silence_start:\s*([\d.]+)/);
+      const endMatch = line.match(/silence_end:\s*([\d.]+)/);
+      if (startMatch) pendingStart = parseFloat(startMatch[1]);
+      if (endMatch && pendingStart !== null) {
+        silences.push({ start: pendingStart, end: parseFloat(endMatch[1]) });
+        pendingStart = null;
+      }
+    }
+
+    // get duration
+    let durationLine = logBuffer.find(l => l.includes('Duration:'));
+    let totalDuration = 0;
+    if (durationLine) {
+      const m = durationLine.match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
+      if (m) totalDuration = (+m[1])*3600 + (+m[2])*60 + parseFloat(m[3]);
+    }
+
+    // build segment boundaries: split at the midpoint of each silence gap
+    const cutPoints = silences.map(s => (s.start + s.end) / 2).filter(t => t > 1 && t < totalDuration - 1);
+    const boundaries = [0, ...cutPoints, totalDuration];
+
+    if (boundaries.length <= 2) {
+      emptyNote.textContent = 'No clear pauses found — try lowering the sensitivity or shortening the pause length.';
+      setStatus('', false);
+      processBtn.disabled = false;
+      return;
+    }
+
+    setStatus(`Cutting ${boundaries.length - 1} clips…`);
+    progressTrack.classList.add('show');
+
+    for (let i = 0; i < boundaries.length - 1; i++) {
+      const start = boundaries[i];
+      const end = boundaries[i+1];
+      if (end - start < 0.8) continue; // skip near-zero slivers
+      const outName = `clip_${i}.mp4`;
+      progressFill.style.width = `${Math.round((i / (boundaries.length-1)) * 100)}%`;
+
+      await ffmpeg.exec([
+        '-ss', start.toFixed(2),
+        '-i', inputName,
+        '-to', (end - start).toFixed(2),
+        '-c', 'copy',
+        '-avoid_negative_ts', 'make_zero',
+        outName
+      ]);
+
+      const data = await ffmpeg.readFile(outName);
+      const blob = new Blob([data.buffer], { type: 'video/mp4' });
+      const url = URL.createObjectURL(blob);
+      clips.push({ url, blob, start, end, index: i, name: `clip_${clips.length + 1}.mp4` });
+      await ffmpeg.deleteFile(outName);
+    }
+
+    progressFill.style.width = '100%';
+    await ffmpeg.deleteFile(inputName);
+
+    renderClips();
+    setStatus('', false);
+    progressTrack.classList.remove('show');
+  } catch (err) {
+    appendLog('ERROR: ' + err.message);
+    emptyNote.textContent = 'Something went wrong processing this file. Try a shorter clip or check the engine log below.';
+    setStatus('', false);
+  }
+  processBtn.disabled = false;
+});
+
+function renderClips() {
+  if (clips.length === 0) {
+    emptyNote.style.display = 'block';
+    emptyNote.textContent = 'No clips produced — try adjusting the sensitivity.';
+    resultsWrap.style.display = 'none';
+    return;
+  }
+  emptyNote.style.display = 'none';
+  resultsWrap.style.display = 'block';
+  clipCount.textContent = `${clips.length} clip${clips.length > 1 ? 's' : ''}`;
+  clipList.innerHTML = '';
+
+  clips.forEach((clip, i) => {
+    const card = document.createElement('div');
+    card.className = 'clip-card';
+    card.innerHTML = `
+      <video src="${clip.url}" muted playsinline preload="metadata"></video>
+      <div class="clip-meta">
+        <p class="clip-title">Clip ${i + 1}</p>
+        <p class="clip-time">${fmtTime(clip.start)} – ${fmtTime(clip.end)} · ${(clip.end - clip.start).toFixed(1)}s</p>
+        <div class="clip-actions">
+          <label><input type="checkbox" class="clip-check" data-idx="${i}"> Keep</label>
+          <button class="dl-btn" data-idx="${i}">Download</button>
+        </div>
+      </div>
+    `;
+    const video = card.querySelector('video');
+    video.addEventListener('click', () => {
+      if (video.paused) video.play(); else video.pause();
+    });
+    card.querySelector('.dl-btn').addEventListener('click', () => downloadClip(i));
+    clipList.appendChild(card);
+  });
+}
+
+function downloadClip(i) {
+  const clip = clips[i];
+  const a = document.createElement('a');
+  a.href = clip.url;
+  a.download = clip.name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+selectAllBtn.addEventListener('click', () => {
+  const boxes = document.querySelectorAll('.clip-check');
+  const allChecked = [...boxes].every(b => b.checked);
+  boxes.forEach(b => b.checked = !allChecked);
+  selectAllBtn.textContent = allChecked ? 'Select all' : 'Deselect all';
+});
+
+downloadSelectedBtn.addEventListener('click', () => {
+  const boxes = document.querySelectorAll('.clip-check:checked');
+  if (boxes.length === 0) { alert('Check the clips you want first.'); return; }
+  boxes.forEach((b, n) => {
+    setTimeout(() => downloadClip(parseInt(b.dataset.idx)), n * 400);
+  });
+});
+</script>
+</body>
+</html>
