@@ -276,7 +276,7 @@
   </div>
 
   <div class="empty-note" id="emptyNote">No clips yet — upload a video above to get started.</div>
-  <p style="text-align:center; color:var(--text-dim); font-size:0.68rem; margin-top:24px;">build: duration-patch-v1</p>
+  <p style="text-align:center; color:var(--text-dim); font-size:0.68rem; margin-top:24px;">build: duration-patch-v2-diagnostic</p>
 
 <script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
@@ -352,6 +352,7 @@ function patchClipDuration(initBuffer, durationSeconds) {
   const buffer = initBuffer.slice(0); // clone — never mutate the shared template
   const view = new DataView(buffer);
   const boxes = findBoxesRecursive(buffer);
+  appendLog(`[patch] target duration: ${durationSeconds.toFixed(2)}s | boxes found: ${boxes.map(b=>b.type).join(',')}`);
   let movieTimescale = null;
 
   const mvhd = boxes.find(b => b.type === 'mvhd');
@@ -359,21 +360,37 @@ function patchClipDuration(initBuffer, durationSeconds) {
     const version = view.getUint8(mvhd.payloadStart);
     if (version === 1) {
       movieTimescale = view.getUint32(mvhd.payloadStart + 20);
-      view.setBigUint64(mvhd.payloadStart + 24, BigInt(Math.round(durationSeconds * movieTimescale)));
+      const oldDur = view.getBigUint64(mvhd.payloadStart + 24);
+      const newDur = BigInt(Math.round(durationSeconds * movieTimescale));
+      view.setBigUint64(mvhd.payloadStart + 24, newDur);
+      appendLog(`[patch] mvhd v1 timescale=${movieTimescale} old=${oldDur} new=${newDur}`);
     } else {
       movieTimescale = view.getUint32(mvhd.payloadStart + 12);
-      view.setUint32(mvhd.payloadStart + 16, Math.round(durationSeconds * movieTimescale) >>> 0);
+      const oldDur = view.getUint32(mvhd.payloadStart + 16);
+      const newDur = Math.round(durationSeconds * movieTimescale) >>> 0;
+      view.setUint32(mvhd.payloadStart + 16, newDur);
+      appendLog(`[patch] mvhd v0 timescale=${movieTimescale} old=${oldDur} new=${newDur}`);
     }
+  } else {
+    appendLog('[patch] WARNING: no mvhd box found');
   }
 
   const tkhd = boxes.find(b => b.type === 'tkhd');
   if (tkhd && movieTimescale) {
     const version = view.getUint8(tkhd.payloadStart);
     if (version === 1) {
-      view.setBigUint64(tkhd.payloadStart + 28, BigInt(Math.round(durationSeconds * movieTimescale)));
+      const oldDur = view.getBigUint64(tkhd.payloadStart + 28);
+      const newDur = BigInt(Math.round(durationSeconds * movieTimescale));
+      view.setBigUint64(tkhd.payloadStart + 28, newDur);
+      appendLog(`[patch] tkhd v1 old=${oldDur} new=${newDur}`);
     } else {
-      view.setUint32(tkhd.payloadStart + 20, Math.round(durationSeconds * movieTimescale) >>> 0);
+      const oldDur = view.getUint32(tkhd.payloadStart + 20);
+      const newDur = Math.round(durationSeconds * movieTimescale) >>> 0;
+      view.setUint32(tkhd.payloadStart + 20, newDur);
+      appendLog(`[patch] tkhd v0 old=${oldDur} new=${newDur}`);
     }
+  } else {
+    appendLog('[patch] WARNING: no tkhd box found or no movieTimescale');
   }
 
   const mdhd = boxes.find(b => b.type === 'mdhd');
@@ -381,11 +398,19 @@ function patchClipDuration(initBuffer, durationSeconds) {
     const version = view.getUint8(mdhd.payloadStart);
     if (version === 1) {
       const ts = view.getUint32(mdhd.payloadStart + 20);
-      view.setBigUint64(mdhd.payloadStart + 24, BigInt(Math.round(durationSeconds * ts)));
+      const oldDur = view.getBigUint64(mdhd.payloadStart + 24);
+      const newDur = BigInt(Math.round(durationSeconds * ts));
+      view.setBigUint64(mdhd.payloadStart + 24, newDur);
+      appendLog(`[patch] mdhd v1 timescale=${ts} old=${oldDur} new=${newDur}`);
     } else {
       const ts = view.getUint32(mdhd.payloadStart + 12);
-      view.setUint32(mdhd.payloadStart + 16, Math.round(durationSeconds * ts) >>> 0);
+      const oldDur = view.getUint32(mdhd.payloadStart + 16);
+      const newDur = Math.round(durationSeconds * ts) >>> 0;
+      view.setUint32(mdhd.payloadStart + 16, newDur);
+      appendLog(`[patch] mdhd v0 timescale=${ts} old=${oldDur} new=${newDur}`);
     }
+  } else {
+    appendLog('[patch] WARNING: no mdhd box found');
   }
 
   return buffer;
