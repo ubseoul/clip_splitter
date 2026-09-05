@@ -309,6 +309,87 @@ function fmtTime(s) {
   return `${m}:${sec.padStart(4,'0')}`;
 }
 
+// The init segment mp4box.js hands us encodes the FULL original video's duration
+// in its mvhd/tkhd/mdhd boxes. Every clip reuses that same init segment, so without
+// patching, every clip's player thinks it's as long as the whole source video —
+// it plays the real content, then freezes/blanks for the remaining declared time.
+// This walks the box tree and overwrites just the duration fields (same byte width,
+// no structural changes) so each clip reports its own true length.
+function findBoxesRecursive(buffer) {
+  const view = new DataView(buffer);
+  const results = [];
+  function walk(start, end) {
+    let offset = start;
+    while (offset + 8 <= end) {
+      let size = view.getUint32(offset);
+      const type = String.fromCharCode(
+        view.getUint8(offset + 4), view.getUint8(offset + 5),
+        view.getUint8(offset + 6), view.getUint8(offset + 7)
+      );
+      let headerSize = 8;
+      if (size === 1) {
+        const hi = view.getUint32(offset + 8);
+        const lo = view.getUint32(offset + 12);
+        size = hi * 4294967296 + lo;
+        headerSize = 16;
+      } else if (size === 0) {
+        size = end - offset;
+      }
+      if (size < headerSize || offset + size > end) break; // malformed guard
+      results.push({ type, start: offset, payloadStart: offset + headerSize, end: offset + size });
+      if (['moov', 'trak', 'mdia', 'minf', 'stbl'].includes(type)) {
+        walk(offset + headerSize, offset + size);
+      }
+      offset += size;
+    }
+  }
+  walk(0, buffer.byteLength);
+  return results;
+}
+
+function patchClipDuration(initBuffer, durationSeconds) {
+  const buffer = initBuffer.slice(0); // clone — never mutate the shared template
+  const view = new DataView(buffer);
+  const boxes = findBoxesRecursive(buffer);
+  let movieTimescale = null;
+
+  const mvhd = boxes.find(b => b.type === 'mvhd');
+  if (mvhd) {
+    const version = view.getUint8(mvhd.payloadStart);
+    if (version === 1) {
+      movieTimescale = view.getUint32(mvhd.payloadStart + 20);
+      view.setBigUint64(mvhd.payloadStart + 24, BigInt(Math.round(durationSeconds * movieTimescale)));
+    } else {
+      movieTimescale = view.getUint32(mvhd.payloadStart + 12);
+      view.setUint32(mvhd.payloadStart + 16, Math.round(durationSeconds * movieTimescale) >>> 0);
+    }
+  }
+
+  const tkhd = boxes.find(b => b.type === 'tkhd');
+  if (tkhd && movieTimescale) {
+    const version = view.getUint8(tkhd.payloadStart);
+    if (version === 1) {
+      view.setBigUint64(tkhd.payloadStart + 28, BigInt(Math.round(durationSeconds * movieTimescale)));
+    } else {
+      view.setUint32(tkhd.payloadStart + 20, Math.round(durationSeconds * movieTimescale) >>> 0);
+    }
+  }
+
+  const mdhd = boxes.find(b => b.type === 'mdhd');
+  if (mdhd) {
+    const version = view.getUint8(mdhd.payloadStart);
+    if (version === 1) {
+      const ts = view.getUint32(mdhd.payloadStart + 20);
+      view.setBigUint64(mdhd.payloadStart + 24, BigInt(Math.round(durationSeconds * ts)));
+    } else {
+      const ts = view.getUint32(mdhd.payloadStart + 12);
+      view.setUint32(mdhd.payloadStart + 16, Math.round(durationSeconds * ts) >>> 0);
+    }
+  }
+
+  return buffer;
+}
+
 logToggle.addEventListener('click', () => {
   log.classList.toggle('show');
   logToggle.textContent = log.classList.contains('show') ? 'hide technical log' : 'show technical log';
@@ -463,10 +544,11 @@ function processFile(file) {
     }
 
     for (let i = 0; i < segmentBuffers.length; i++) {
-      const blob = new Blob([initSegmentBuffer, segmentBuffers[i]], { type: 'video/mp4' });
-      const url = URL.createObjectURL(blob);
       const start = i * segLen;
       const end = Math.min((i + 1) * segLen, totalDuration || (i + 1) * segLen);
+      const patchedInit = patchClipDuration(initSegmentBuffer, end - start);
+      const blob = new Blob([patchedInit, segmentBuffers[i]], { type: 'video/mp4' });
+      const url = URL.createObjectURL(blob);
       clips.push({
         url, blob, start, end, index: i,
         name: `clip_${sessionStamp}_${i + 1}.mp4`
