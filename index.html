@@ -121,7 +121,7 @@
 
     <div class="status" id="statusRow">
       <div class="spinner"></div>
-      <span id="statusText">Loading…</span>
+      <span id="statusText">Working…</span>
     </div>
     <div class="progress-track" id="progressTrack">
       <div class="progress-fill" id="progressFill"></div>
@@ -144,13 +144,10 @@
   </div>
 
   <div class="empty-note" id="emptyNote">No clips yet — upload a video above to get started.</div>
-  <p style="text-align:center; color:var(--text-dim); font-size:0.68rem; margin-top:24px;">build: lightweight-remux-v3-bframe-fix</p>
+  <p style="text-align:center; color:var(--text-dim); font-size:0.68rem; margin-top:24px;">build: playback-record-v1</p>
 
-<script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script type="module">
-import { Muxer, ArrayBufferTarget } from 'https://cdn.jsdelivr.net/npm/mp4-muxer@4/build/mp4-muxer.mjs';
-
 const $ = (id) => document.getElementById(id);
 const drop = $('drop'), fileInput = $('fileInput'), filenameRow = $('filenameRow'),
       filenameText = $('filenameText'), clearFile = $('clearFile'),
@@ -205,13 +202,20 @@ function restoreSettings() {
 }
 restoreSettings();
 
-// mp4box.js and mp4-muxer are small (~200KB combined) and ready as soon as
-// the page loads — no multi-megabyte engine download step needed.
-let ready = typeof MP4Box !== 'undefined';
-if (!ready) {
-  setStatus('Library failed to load — check your connection and reload.');
-} else {
-  setStatus('', false);
+// Pick the best output format this browser can actually record.
+// Safari (14.1+) can record real .mp4 directly — great for iOS, since the
+// output plays and saves everywhere without any conversion.
+function pickMimeType() {
+  const candidates = [
+    'video/mp4',
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm'
+  ];
+  for (const type of candidates) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(type)) return type;
+  }
+  return null;
 }
 
 drop.addEventListener('click', () => fileInput.click());
@@ -228,7 +232,7 @@ function selectFile(file) {
   const sizeMB = file.size / (1024*1024);
   emptyNote.style.display = 'block';
   if (sizeMB > 400) {
-    emptyNote.textContent = `Heads up — this file is ${sizeMB.toFixed(0)}MB. It all loads into memory at once, so very large files may be slow or stall on older phones.`;
+    emptyNote.textContent = `Heads up — this file is ${sizeMB.toFixed(0)}MB. Longer videos take roughly as long to process as their own length, since each clip is captured in real time.`;
   } else {
     emptyNote.textContent = 'No clips yet — tap "Split into clips" to get started.';
   }
@@ -241,8 +245,12 @@ clearFile.addEventListener('click', () => {
 });
 
 processBtn.addEventListener('click', async () => {
-  if (!currentFile || !ready) {
-    if (!currentFile) alert('Choose a video first.');
+  if (!currentFile) { alert('Choose a video first.'); return; }
+
+  const mimeType = pickMimeType();
+  if (!mimeType) {
+    appendLog('ERROR: This browser has no supported MediaRecorder output format.');
+    emptyNote.textContent = 'This browser can\'t record video clips. Try updating it or using a different browser.';
     return;
   }
 
@@ -258,136 +266,116 @@ processBtn.addEventListener('click', async () => {
   emptyNote.textContent = 'Working on it…';
   processBtn.disabled = true;
   progressTrack.classList.add('show');
-  progressFill.style.width = '10%';
+  progressFill.style.width = '2%';
 
   try {
-    await processFile(currentFile);
+    await processFile(currentFile, mimeType);
     renderClips();
     setStatus('', false);
   } catch (err) {
     appendLog('ERROR: ' + (err?.message || err));
-    emptyNote.textContent = 'Something went wrong reading this file. Check the technical log below, or try a different video.';
+    emptyNote.textContent = 'Something went wrong processing this file. Check the technical log below, or try a different video.';
     setStatus('', false);
   }
   progressTrack.classList.remove('show');
   processBtn.disabled = false;
 });
 
-// Groups samples into keyframe-aligned batches close to the target length.
-// Walks samples in their natural decode order (required for correct playback
-// when a video uses B-frames) and uses presentation time (cts) only to judge
-// roughly how much real playback time has accumulated.
-function groupIntoClips(samples, trackTimescale, segLenSeconds) {
-  const segLenTS = segLenSeconds * trackTimescale;
-  const groups = [];
-  let current = [];
-  let groupStartCts = null;
-  for (const s of samples) {
-    if (current.length === 0) {
-      current.push(s);
-      groupStartCts = s.cts;
-      continue;
-    }
-    const elapsed = s.cts - groupStartCts;
-    if (elapsed >= segLenTS && s.is_sync) {
-      groups.push(current);
-      current = [s];
-      groupStartCts = s.cts;
-    } else {
-      current.push(s);
-    }
-  }
-  if (current.length) groups.push(current);
-  return groups;
-}
+async function processFile(file, mimeType) {
+  setStatus('Loading video…');
+  const video = document.createElement('video');
+  video.muted = true;
+  video.playsInline = true;
+  video.src = URL.createObjectURL(file);
 
-// Builds one standalone MP4 file from a group of already-encoded samples —
-// pure container writing, no decoding or re-encoding of the video itself.
-// Samples are fed in decode order with their presentation (cts) timestamps;
-// the muxer derives correct internal decode timing from that order itself.
-function buildClipFromSamples(sampleGroup, trackTimescale, codecFamily, width, height, description) {
-  const muxer = new Muxer({
-    target: new ArrayBufferTarget(),
-    video: { codec: codecFamily, width, height, description },
-    fastStart: 'in-memory'
+  await new Promise((resolve, reject) => {
+    video.onloadedmetadata = resolve;
+    video.onerror = () => reject(new Error('Could not read this video file.'));
   });
 
-  const ctsOffset = Math.min(...sampleGroup.map(s => s.cts));
-  for (const s of sampleGroup) {
-    const relCts = s.cts - ctsOffset;
-    const timestampUs = Math.round((relCts / trackTimescale) * 1e6);
-    const durationUs = Math.round((s.duration / trackTimescale) * 1e6);
-    muxer.addVideoChunkRaw(s.data, s.is_sync ? 'key' : 'delta', timestampUs, durationUs);
-  }
-  muxer.finalize();
-  return muxer.target.buffer;
-}
-
-async function processFile(file) {
+  const duration = video.duration;
   const segLen = parseFloat(clipLength.value);
-  const mp4boxfile = MP4Box.createFile();
-  const allSamples = [];
-  let trackTimescale = null, codecFamily = null, description = null, width = null, height = null;
-  let errorMsg = null;
+  const numClips = Math.max(1, Math.ceil(duration / segLen));
 
-  mp4boxfile.onError = (e) => { errorMsg = 'mp4box: ' + e; };
+  const canvas = document.createElement('canvas');
+  const maxDim = 1280; // cap resolution for speed/memory; plenty for previewing/picking
+  const scale = Math.min(1, maxDim / Math.max(video.videoWidth, video.videoHeight));
+  canvas.width = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
+  const ctx = canvas.getContext('2d');
 
-  mp4boxfile.onReady = (info) => {
-    setStatus('Reading codec info…');
-    const vTrack = info.videoTracks && info.videoTracks[0];
-    if (!vTrack) { errorMsg = 'No video track found in this file.'; return; }
-    trackTimescale = vTrack.timescale;
+  appendLog(`[info] duration=${duration.toFixed(2)}s, ${numClips} clips, format=${mimeType}, canvas=${canvas.width}x${canvas.height}`);
 
-    const trak = mp4boxfile.getTrackById(vTrack.id);
-    const entry = trak.mdia.minf.stbl.stsd.entries[0];
-    if (entry.avcC || entry.hvcC) {
-      const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
-      if (entry.avcC) { entry.avcC.write(stream); codecFamily = 'avc'; }
-      else { entry.hvcC.write(stream); codecFamily = 'hevc'; }
-      description = new Uint8Array(stream.buffer, 8);
-    } else {
-      errorMsg = "This video's codec isn't H.264 or HEVC, which is all this tool currently supports.";
-      return;
-    }
-    width = entry.width;
-    height = entry.height;
+  for (let i = 0; i < numClips; i++) {
+    const start = i * segLen;
+    const end = Math.min((i + 1) * segLen, duration);
+    setStatus(`Capturing clip ${i + 1} of ${numClips}…`);
 
-    setStatus('Extracting frames…');
-    mp4boxfile.onSamples = (id, user, samples) => {
-      if (id !== vTrack.id) return;
-      allSamples.push(...samples);
-    };
-    mp4boxfile.setExtractionOptions(vTrack.id, null, { nbSamples: 100000 });
-    mp4boxfile.start();
-  };
-
-  setStatus('Reading file…');
-  const arrayBuffer = await file.arrayBuffer();
-  arrayBuffer.fileStart = 0;
-  mp4boxfile.appendBuffer(arrayBuffer);
-  mp4boxfile.flush();
-
-  if (errorMsg) throw new Error(errorMsg);
-  if (allSamples.length === 0) throw new Error('No frames could be extracted from this file.');
-
-  const groups = groupIntoClips(allSamples, trackTimescale, segLen);
-
-  setStatus(`Building ${groups.length} clips…`);
-  for (let i = 0; i < groups.length; i++) {
     try {
-      const buffer = buildClipFromSamples(groups[i], trackTimescale, codecFamily, width, height, description);
-      const blob = new Blob([buffer], { type: 'video/mp4' });
+      const blob = await captureRange(video, canvas, ctx, start, end, mimeType);
       const url = URL.createObjectURL(blob);
-      const ctsValues = groups[i].map(s => s.cts);
-      const start = Math.min(...ctsValues) / trackTimescale;
-      const endSample = groups[i].reduce((max, s) => (s.cts + s.duration > max.cts + max.duration ? s : max));
-      const end = (endSample.cts + endSample.duration) / trackTimescale;
-      clips.push({ url, blob, start, end, index: i, name: `clip_${sessionStamp}_${i + 1}.mp4` });
+      const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
+      clips.push({
+        url, blob, start, end, index: i,
+        name: `clip_${sessionStamp}_${i + 1}.${ext}`
+      });
     } catch (e) {
       appendLog(`[clip ${i + 1}] failed: ` + (e?.message || e));
     }
-    progressFill.style.width = `${Math.round(((i + 1) / groups.length) * 100)}%`;
+    progressFill.style.width = `${Math.round(((i + 1) / numClips) * 100)}%`;
   }
+
+  URL.revokeObjectURL(video.src);
+}
+
+function captureRange(video, canvas, ctx, start, end, mimeType) {
+  return new Promise((resolve, reject) => {
+    const stream = canvas.captureStream(30);
+    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 4_000_000 });
+    const chunks = [];
+    let rafId = null;
+    let finished = false;
+
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+    recorder.onerror = (e) => {
+      if (finished) return;
+      finished = true;
+      cancelAnimationFrame(rafId);
+      reject(new Error('Recorder error: ' + (e.error?.message || e)));
+    };
+    recorder.onstop = () => {
+      if (finished) return;
+      finished = true;
+      resolve(new Blob(chunks, { type: mimeType }));
+    };
+
+    function drawLoop() {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      if (video.currentTime >= end - 0.02 || video.ended) {
+        video.pause();
+        if (recorder.state === 'recording') recorder.stop();
+        return;
+      }
+      rafId = requestAnimationFrame(drawLoop);
+    }
+
+    video.currentTime = start;
+    video.onseeked = () => {
+      video.onseeked = null;
+      recorder.start();
+      video.play().then(() => {
+        rafId = requestAnimationFrame(drawLoop);
+      }).catch(reject);
+    };
+
+    // Safety timeout in case a seek or the end condition never fires
+    setTimeout(() => {
+      if (!finished && recorder.state === 'recording') {
+        video.pause();
+        recorder.stop();
+      }
+    }, (end - start) * 1000 + 3000);
+  });
 }
 
 function renderClips() {
@@ -430,16 +418,13 @@ function renderClips() {
 
   const observer = new IntersectionObserver((entries) => {
     entries.forEach(entry => {
-      const video = entry.target;
+      const v = entry.target;
       if (entry.isIntersecting) {
-        if (!video.src && video.dataset.src) {
-          video.preload = 'metadata';
-          video.src = video.dataset.src;
-        }
+        if (!v.src && v.dataset.src) { v.preload = 'metadata'; v.src = v.dataset.src; }
       } else {
-        video.pause();
-        video.removeAttribute('src');
-        video.load();
+        v.pause();
+        v.removeAttribute('src');
+        v.load();
       }
     });
   }, { rootMargin: '200px 0px' });
