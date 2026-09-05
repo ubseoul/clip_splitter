@@ -227,7 +227,7 @@
     <div class="mark"></div>
     <h1>Splitpoint</h1>
   </div>
-  <p class="tagline">Upload a video and it slices the whole thing into short clips you can preview and keep.</p>
+  <p class="tagline">Upload a video and it slices the whole thing into short clips you can preview and keep. Clips are video-only, no audio.</p>
 
   <div class="panel">
     <div class="drop" id="drop">
@@ -253,13 +253,13 @@
 
     <div class="status" id="statusRow">
       <div class="spinner"></div>
-      <span id="statusText">Loading engine…</span>
+      <span id="statusText">Loading…</span>
     </div>
     <div class="progress-track" id="progressTrack">
       <div class="progress-fill" id="progressFill"></div>
     </div>
 
-    <div class="log-toggle" id="logToggle" style="display:none;">show engine log</div>
+    <div class="log-toggle" id="logToggle" style="display:none;">show technical log</div>
     <div class="log" id="log"></div>
   </div>
 
@@ -277,10 +277,8 @@
 
   <div class="empty-note" id="emptyNote">No clips yet — upload a video above to get started.</div>
 
+<script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
 <script type="module">
-import { FFmpeg } from 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
-import { toBlobURL, fetchFile } from 'https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js';
-
 const $ = (id) => document.getElementById(id);
 const drop = $('drop'), fileInput = $('fileInput'), filenameRow = $('filenameRow'),
       filenameText = $('filenameText'), clearFile = $('clearFile'),
@@ -291,10 +289,9 @@ const drop = $('drop'), fileInput = $('fileInput'), filenameRow = $('filenameRow
       logToggle = $('logToggle'), log = $('log'),
       clipLength = $('clipLength'), clipLengthVal = $('clipLengthVal');
 
-let ffmpeg = null;
-let ready = false;
 let currentFile = null;
 let clips = []; // {url, blob, start, end, index}
+let sessionStamp = '';
 
 function setStatus(msg, show=true) {
   statusText.textContent = msg;
@@ -303,12 +300,18 @@ function setStatus(msg, show=true) {
 function appendLog(line) {
   log.textContent += line + '\n';
   log.scrollTop = log.scrollHeight;
+  logToggle.style.display = 'block';
 }
 function fmtTime(s) {
   const m = Math.floor(s / 60);
   const sec = (s % 60).toFixed(1);
   return `${m}:${sec.padStart(4,'0')}`;
 }
+
+logToggle.addEventListener('click', () => {
+  log.classList.toggle('show');
+  logToggle.textContent = log.classList.contains('show') ? 'hide technical log' : 'show technical log';
+});
 
 clipLength.addEventListener('input', () => {
   clipLengthVal.textContent = `${parseFloat(clipLength.value).toFixed(1)} s`;
@@ -333,46 +336,19 @@ function restoreSettings() {
 }
 restoreSettings();
 
-async function loadCachedURL(url, mimeType) {
-  try {
-    const cache = await caches.open('splitpoint-engine-v1');
-    let response = await cache.match(url);
-    if (!response) {
-      response = await fetch(url);
-      if (response.ok) await cache.put(url, response.clone());
+// No large engine to load — mp4box.js is a small, already-loaded script.
+// It's ready as soon as the page finishes loading.
+processBtn.disabled = false;
+let ready = typeof MP4Box !== 'undefined';
+if (!ready) {
+  setStatus('Library failed to load — check your connection and reload.');
+  window.addEventListener('load', () => {
+    if (typeof MP4Box !== 'undefined') {
+      ready = true;
+      setStatus('', false);
     }
-    const blob = await response.blob();
-    return URL.createObjectURL(new Blob([blob], { type: mimeType }));
-  } catch (e) {
-    // Cache Storage unavailable (rare) — fall back to a direct fetch each time
-    return toBlobURL(url, mimeType);
-  }
-}
-
-async function initFFmpeg() {
-  ffmpeg = new FFmpeg();
-  ffmpeg.on('log', ({ message }) => appendLog(message));
-  const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
-  const alreadyCached = await caches.open('splitpoint-engine-v1').then(c => c.match(`${baseURL}/ffmpeg-core.wasm`)).catch(() => null);
-  setStatus(alreadyCached ? 'Loading engine…' : 'Downloading engine (one-time only — instant every time after)…');
-  statusRow.classList.add('show');
-  await ffmpeg.load({
-    coreURL: await loadCachedURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-    wasmURL: await loadCachedURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
   });
-  ready = true;
-  setStatus('', false);
-  logToggle.style.display = 'block';
 }
-initFFmpeg().catch(err => {
-  setStatus('Engine failed to load — check your connection and reload.');
-  appendLog('INIT ERROR: ' + err.message);
-});
-
-logToggle.addEventListener('click', () => {
-  log.classList.toggle('show');
-  logToggle.textContent = log.classList.contains('show') ? 'hide engine log' : 'show engine log';
-});
 
 drop.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', (e) => {
@@ -384,15 +360,13 @@ function selectFile(file) {
   filenameText.textContent = `${file.name} · ${(file.size / (1024*1024)).toFixed(1)} MB`;
   filenameRow.style.display = 'flex';
   drop.style.display = 'none';
-  processBtn.disabled = !ready;
+  processBtn.disabled = false;
 
-  // Warn on large files before they commit to processing
   const sizeMB = file.size / (1024*1024);
-  if (sizeMB > 150) {
-    emptyNote.style.display = 'block';
-    emptyNote.textContent = `Heads up — this file is ${sizeMB.toFixed(0)}MB. Processing happens entirely on your phone, so long or high-res videos can take a while and may stall on older devices. Consider trimming it shorter first if it hangs.`;
+  emptyNote.style.display = 'block';
+  if (sizeMB > 400) {
+    emptyNote.textContent = `Heads up — this file is ${sizeMB.toFixed(0)}MB. It all loads into memory at once, so very large files may be slow or stall on older phones.`;
   } else {
-    emptyNote.style.display = 'block';
     emptyNote.textContent = 'No clips yet — tap "Split into clips" to get started.';
   }
 }
@@ -403,8 +377,6 @@ clearFile.addEventListener('click', () => {
   drop.style.display = 'block';
   processBtn.disabled = true;
 });
-
-let sessionStamp = '';
 
 processBtn.addEventListener('click', async () => {
   if (!currentFile || !ready) return;
@@ -420,62 +392,89 @@ processBtn.addEventListener('click', async () => {
   emptyNote.style.display = 'block';
   emptyNote.textContent = 'Working on it…';
   processBtn.disabled = true;
+  progressTrack.classList.add('show');
+  progressFill.style.width = '10%';
 
   try {
-    const inputName = 'input' + (currentFile.name.match(/\.\w+$/)?.[0] || '.mp4');
-    setStatus('Reading file…');
-    await ffmpeg.writeFile(inputName, await fetchFile(currentFile));
-
-    await processFast(inputName);
-
+    await processFile(currentFile);
     renderClips();
     setStatus('', false);
-    progressTrack.classList.remove('show');
   } catch (err) {
-    appendLog('ERROR: ' + err.message);
-    emptyNote.textContent = 'Something went wrong processing this file. Try a shorter clip or check the engine log below.';
+    appendLog('ERROR: ' + (err?.message || err));
+    emptyNote.textContent = 'Something went wrong reading this file. Check the technical log below, or try a different video.';
     setStatus('', false);
   }
+  progressTrack.classList.remove('show');
   processBtn.disabled = false;
 });
 
-async function processFast(inputName) {
-  setStatus('Slicing into fixed-length clips…');
-  progressTrack.classList.add('show');
-  const segLen = parseFloat(clipLength.value);
-  const pattern = 'out_%03d.mp4';
+function processFile(file) {
+  return new Promise(async (resolve, reject) => {
+    const segLen = parseFloat(clipLength.value);
+    const mp4boxfile = MP4Box.createFile();
+    let initSegmentBuffer = null;
+    const segmentBuffers = [];
+    let totalDuration = 0;
+    let finished = false;
 
-  await ffmpeg.exec([
-    '-i', inputName,
-    '-c', 'copy',
-    '-map', '0',
-    '-f', 'segment',
-    '-segment_time', segLen.toFixed(2),
-    '-reset_timestamps', '1',
-    pattern
-  ]);
+    mp4boxfile.onError = (e) => {
+      if (!finished) { finished = true; reject(new Error('mp4box: ' + e)); }
+    };
 
-  const files = (await ffmpeg.listDir('/'))
-    .filter(f => f.name.startsWith('out_') && f.name.endsWith('.mp4'))
-    .sort((a, b) => a.name.localeCompare(b.name));
+    mp4boxfile.onReady = (info) => {
+      setStatus('Finding cut points…');
+      const vTrack = info.videoTracks && info.videoTracks[0];
+      if (!vTrack) {
+        finished = true;
+        reject(new Error('No video track found in this file.'));
+        return;
+      }
+      totalDuration = info.duration / info.timescale;
+      const fps = vTrack.nb_samples / totalDuration || 30;
+      const samplesPerSeg = Math.max(1, Math.round(fps * segLen));
 
-  for (let i = 0; i < files.length; i++) {
-    const data = await ffmpeg.readFile(files[i].name);
-    const blob = new Blob([data.buffer], { type: 'video/mp4' });
-    const url = URL.createObjectURL(blob);
-    clips.push({
-      url, blob,
-      start: i * segLen,
-      end: (i + 1) * segLen,
-      index: i,
-      name: `clip_${sessionStamp}_${i + 1}.mp4`
-    });
-    await ffmpeg.deleteFile(files[i].name);
-    progressFill.style.width = `${Math.round(((i+1) / files.length) * 100)}%`;
-  }
-  await ffmpeg.deleteFile(inputName);
+      mp4boxfile.setSegmentOptions(vTrack.id, null, { nbSamples: samplesPerSeg, rapAlignement: true });
+      const initSegs = mp4boxfile.initializeSegmentation();
+      initSegmentBuffer = initSegs[0].buffer;
+      setStatus('Slicing into clips…');
+      mp4boxfile.start();
+    };
+
+    mp4boxfile.onSegment = (id, user, buffer, sampleNumber, last) => {
+      segmentBuffers.push(buffer);
+      progressFill.style.width = `${Math.min(90, 10 + segmentBuffers.length * 8)}%`;
+    };
+
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      arrayBuffer.fileStart = 0;
+      mp4boxfile.appendBuffer(arrayBuffer);
+      mp4boxfile.flush();
+    } catch (e) {
+      if (!finished) { finished = true; reject(e); return; }
+    }
+
+    if (finished) return; // already rejected above
+
+    if (!initSegmentBuffer || segmentBuffers.length === 0) {
+      reject(new Error('No clips could be produced from this file — it may use a format this tool can\'t read.'));
+      return;
+    }
+
+    for (let i = 0; i < segmentBuffers.length; i++) {
+      const blob = new Blob([initSegmentBuffer, segmentBuffers[i]], { type: 'video/mp4' });
+      const url = URL.createObjectURL(blob);
+      const start = i * segLen;
+      const end = Math.min((i + 1) * segLen, totalDuration || (i + 1) * segLen);
+      clips.push({
+        url, blob, start, end, index: i,
+        name: `clip_${sessionStamp}_${i + 1}.mp4`
+      });
+    }
+    progressFill.style.width = '100%';
+    resolve();
+  });
 }
-
 
 function renderClips() {
   if (clips.length === 0) {
