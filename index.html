@@ -144,12 +144,14 @@
   </div>
 
   <div class="empty-note" id="emptyNote">No clips yet — upload a video above to get started.</div>
-  <p style="text-align:center; color:var(--text-dim); font-size:0.68rem; margin-top:24px;">build: ffmpeg-final-v2-diagnostic</p>
+  <p style="text-align:center; color:var(--text-dim); font-size:0.68rem; margin-top:24px;">build: ffmpeg-umd-v3</p>
 
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+<script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
 <script type="module">
-import { FFmpeg } from 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
-import { fetchFile } from 'https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js';
+const { FFmpeg } = FFmpegWASM;
+const { fetchFile } = FFmpegUtil;
 
 const $ = (id) => document.getElementById(id);
 const drop = $('drop'), fileInput = $('fileInput'), filenameRow = $('filenameRow'),
@@ -213,7 +215,7 @@ restoreSettings();
 async function loadCachedURL(url, mimeType) {
   appendLog(`[load] requesting ${url.split('/').pop()}`);
   try {
-    const cache = await caches.open('splitpoint-engine-v1');
+    const cache = await caches.open('splitpoint-engine-v2-umd');
     appendLog('[load] cache opened');
     let response = await cache.match(url);
     if (!response) {
@@ -254,9 +256,9 @@ async function initFFmpeg() {
 
   ffmpeg = new FFmpeg();
   ffmpeg.on('log', ({ message }) => appendLog(message));
-  const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+  const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
 
-  const alreadyCached = await caches.open('splitpoint-engine-v1')
+  const alreadyCached = await caches.open('splitpoint-engine-v2-umd')
     .then(c => c.match(`${baseURL}/ffmpeg-core.wasm`))
     .catch(() => null);
   appendLog(`[init] already cached: ${!!alreadyCached}`);
